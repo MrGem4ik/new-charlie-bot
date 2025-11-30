@@ -1,0 +1,9 @@
+﻿tokens.py
+config.py
+.env
+*.env
+*.db
+*.log
+*.mp3
+__pycache__/
+.venv/
