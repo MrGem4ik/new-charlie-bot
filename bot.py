@@ -26,7 +26,6 @@ import re
 import requests
 import io
 import wave
-import pyaudio  # РЈР±РёСЂР°РµРј, С‚Р°Рє РєР°Рє РЅР° СЃРµСЂРІРµСЂРµ РјРѕРіСѓС‚ Р±С‹С‚СЊ РїСЂРѕР±Р»РµРјС‹ СЃ Р°СѓРґРёРѕ
 from threading import Thread
 import subprocess
 import sys
