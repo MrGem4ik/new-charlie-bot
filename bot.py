@@ -1703,9 +1703,6 @@ def handle_message(message):
 
 
 if __name__ == '__main__':
-    # Проверяем конфигурацию перед запуском
-    validate_config()
-    
     # Удаляем вебхук перед запуском polling
     try:
         bot.delete_webhook()
@@ -1722,8 +1719,23 @@ if __name__ == '__main__':
     print(f"🔞 Премиум режим: управление откровенными темами")
     print("=" * 50)
 
+    # Автоперезапуск при ошибках соединения
+    while True:
+        try:
+            bot.infinity_polling(timeout=30, long_polling_timeout=20)
+        except Exception as e:
+            logger.error(f"Ошибка бота: {e}")
+            print(f"🔄 Перезапуск через 10 секунд... Ошибка: {e}")
+            time.sleep(10)
+
     try:
-        bot.infinity_polling()
-    except Exception as e:
-        logger.error(f"Критическая ошибка бота: {e}")
-        print(f"Критическая ошибка: {e}")
+        while True:
+            try:
+                print("🔄 Запускаем бота...")
+                bot.infinity_polling(timeout=20, long_polling_timeout=10)
+            except Exception as e:
+                logger.error(f"Ошибка соединения: {e}")
+                print(f"🔧 Перезапуск через 5 секунд... Ошибка: {e}")
+                time.sleep(5)
+    except KeyboardInterrupt:
+        print("⏹️ Бот остановлен")
