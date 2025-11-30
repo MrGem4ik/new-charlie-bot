@@ -33,8 +33,11 @@ import sqlite3
 import json
 
 # РРјРїРѕСЂС‚РёСЂСѓРµРј РєРѕРЅС„РёРі
-from config import TELEGRAM_BOT_TOKEN, GEMINI_API_KEY, CRYPTO_BOT_TOKEN
+#from config import TELEGRAM_BOT_TOKEN, GEMINI_API_KEY, CRYPTO_BOT_TOKEN
 # РќР°СЃС‚СЂРѕР№РєР° Р»РѕРіРёСЂРѕРІР°РЅРёСЏ
+TELEGRAM_BOT_TOKEN = os.environ.get('TELEGRAM_BOT_TOKEN')
+GEMINI_API_KEY = os.environ.get('GEMINI_API_KEY') 
+CRYPTO_BOT_TOKEN = os.environ.get('CRYPTO_BOT_TOKEN')
 logging.basicConfig(
     format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
     level=logging.INFO
