@@ -32,6 +32,9 @@ import sys
 import sqlite3
 import json
 
+sys.stdout = io.TextIOWrapper(sys.stdout.buffer, encoding='utf-8')
+sys.stderr = io.TextIOWrapper(sys.stderr.buffer, encoding='utf-8')
+
 # РРјРїРѕСЂС‚РёСЂСѓРµРј РєРѕРЅС„РёРі
 #from config import TELEGRAM_BOT_TOKEN, GEMINI_API_KEY, CRYPTO_BOT_TOKEN
 # РќР°СЃС‚СЂРѕР№РєР° Р»РѕРіРёСЂРѕРІР°РЅРёСЏ
@@ -1702,7 +1705,7 @@ def handle_message(message):
 if __name__ == '__main__':
     # Проверяем конфигурацию перед запуском
     validate_config()
-
+    
     # Удаляем вебхук перед запуском polling
     try:
         bot.delete_webhook()
