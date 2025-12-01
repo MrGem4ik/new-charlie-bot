@@ -68,7 +68,6 @@ class UserDatabase:
                 )
             ''')
             
-            # Включаем WAL режим для лучшей производительности
             cursor.execute('PRAGMA journal_mode=WAL')
             cursor.execute('PRAGMA synchronous=NORMAL')
             
@@ -109,14 +108,6 @@ class UserDatabase:
             conn.commit()
             conn.close()
 
-    def update_stars(self, user_id, stars):
-        with self.lock:
-            conn = sqlite3.connect(self.db_path, timeout=30, check_same_thread=False)
-            cursor = conn.cursor()
-            cursor.execute('UPDATE users SET stars = ? WHERE user_id = ?', (stars, user_id))
-            conn.commit()
-            conn.close()
-
     def activate_premium(self, user_id, days=7):
         with self.lock:
             premium_until = datetime.now() + timedelta(days=days)
@@ -138,15 +129,6 @@ class UserDatabase:
                 conn.close()
                 return new_mode
             return False
-
-    def add_stars(self, user_id, amount):
-        with self.lock:
-            user = self.get_user(user_id)
-            if user:
-                new_stars = user['stars'] + amount
-                self.update_stars(user_id, new_stars)
-                return new_stars
-            return 0
 
     def can_use_voice(self, user_id):
         with self.lock:
@@ -195,140 +177,148 @@ class AIChatBot:
         self.gemini_model_standard = None
         self.gemini_model_premium = None
         self.model_name = "Локальный интеллект"
-        self.silero_available = self.check_silero_availability()
         self.initialize_gemini_models()
-
-    def check_silero_availability(self):
-        try:
-            import torch
-            device = torch.device('cpu')
-            torch.set_num_threads(4)
-            model, _ = torch.hub.load(repo_or_dir='snakers4/silero-models', model='silero_tts', language='ru', speaker='v3_1_ru')
-            logger.info("Silero TTS доступен")
-            return True
-        except Exception as e:
-            logger.warning(f"Silero TTS недоступен: {e}")
-            return False
 
     def initialize_gemini_models(self):
         try:
-            if not GEMINI_API_KEY or GEMINI_API_KEY == "YOUR_GEMINI_API_KEY":
+            if not GEMINI_API_KEY:
                 logger.error("GEMINI_API_KEY не установлен")
                 return
             genai.configure(api_key=GEMINI_API_KEY)
+            
+            # Пробуем инициализировать модель
             try:
-                models = genai.list_models()
-                available_models = [model.name for model in models]
-                chat_models = [model for model in available_models if any(x in model for x in ['gemini', 'gemma']) and not any(x in model for x in ['embedding', 'imagen', 'veo', 'aqa', 'learnlm'])]
+                # Пробуем разные модели
+                model_names = [
+                    'models/gemini-1.5-flash-latest',
+                    'models/gemini-1.5-pro-latest',
+                    'models/gemini-pro-latest',
+                    'models/gemma-2-2b-it'
+                ]
+                
+                for model_name in model_names:
+                    try:
+                        logger.info(f"Пробуем модель: {model_name}")
+                        self.gemini_model_standard = genai.GenerativeModel(model_name)
+                        
+                        # Тестируем модель
+                        response = self.gemini_model_standard.generate_content("Привет")
+                        if response and response.text:
+                            logger.info(f"✅ Модель инициализирована: {model_name}")
+                            self.model_name = f"Gemini: {model_name}"
+                            break
+                        else:
+                            self.gemini_model_standard = None
+                    except Exception as e:
+                        logger.warning(f"Модель {model_name} не сработала: {e}")
+                        continue
+                        
             except Exception as e:
-                logger.warning(f"Не удалось получить список моделей: {e}")
-                chat_models = []
-            priority_models = ['models/gemini-2.0-flash', 'models/gemini-2.0-flash-001', 'models/gemini-2.0-flash-lite', 'models/gemini-2.0-flash-lite-001', 'models/gemini-flash-latest', 'models/gemini-pro-latest', 'models/gemini-2.5-flash', 'models/gemma-3-27b-it', 'models/gemma-3-12b-it', 'models/gemma-3-4b-it']
-            models_to_try = []
-            for model in priority_models:
-                if model in chat_models: 
-                    models_to_try.append(model)
-            if not models_to_try and chat_models: 
-                models_to_try = chat_models[:5]
-            if not models_to_try: 
-                models_to_try = priority_models
-            safety_settings_standard = [
-                {"category": "HARM_CATEGORY_HARASSMENT", "threshold": "BLOCK_MEDIUM_AND_ABOVE"},
-                {"category": "HARM_CATEGORY_HATE_SPEECH", "threshold": "BLOCK_MEDIUM_AND_ABOVE"},
-                {"category": "HARM_CATEGORY_SEXUALLY_EXPLICIT", "threshold": "BLOCK_MEDIUM_AND_ABOVE"},
-                {"category": "HARM_CATEGORY_DANGEROUS_CONTENT", "threshold": "BLOCK_MEDIUM_AND_ABOVE"}
-            ]
-            safety_settings_premium = [
-                {"category": "HARM_CATEGORY_HARASSMENT", "threshold": "BLOCK_ONLY_HIGH"},
-                {"category": "HARM_CATEGORY_HATE_SPEECH", "threshold": "BLOCK_MEDIUM_AND_ABOVE"},
-                {"category": "HARM_CATEGORY_SEXUALLY_EXPLICIT", "threshold": "BLOCK_ONLY_HIGH"},
-                {"category": "HARM_CATEGORY_DANGEROUS_CONTENT", "threshold": "BLOCK_MEDIUM_AND_ABOVE"}
-            ]
-            self.gemini_model_standard = self._initialize_model_with_settings(models_to_try, safety_settings_standard, "стандартная")
-            self.gemini_model_premium = self._initialize_model_with_settings(models_to_try, safety_settings_premium, "премиум")
-            if self.gemini_model_standard or self.gemini_model_premium:
-                model_names = []
-                if self.gemini_model_standard: 
-                    model_names.append("стандартная")
-                if self.gemini_model_premium: 
-                    model_names.append("премиум")
-                self.model_name = f"Gemini: {', '.join(model_names)}"
-            else: 
-                logger.error("Все модели Gemini недоступны")
-        except Exception as e: 
-            logger.error(f"Ошибка инициализации Gemini: {str(e)}")
-
-    def _initialize_model_with_settings(self, models_to_try, safety_settings, model_type):
-        for model_name in models_to_try:
-            try:
-                generation_config = {"temperature": 0.9, "top_p": 0.95, "top_k": 40, "max_output_tokens": 200}
-                model = genai.GenerativeModel(model_name=model_name, generation_config=generation_config, safety_settings=safety_settings)
-                test_response = model.generate_content("Привет! Ответь коротко: как дела?")
-                if test_response and test_response.text:
-                    logger.info(f"Успешно инициализирована {model_type} модель: {model_name}")
-                    return model
-            except Exception as e:
-                error_str = str(e)
-                if "quota" in error_str.lower() or "429" in error_str: 
-                    break
-                continue
-        return None
+                logger.error(f"Ошибка при инициализации модели: {e}")
+                
+        except Exception as e:
+            logger.error(f"Критическая ошибка инициализации Gemini: {str(e)}")
 
     def get_ai_response(self, user_id: int, user_text: str, lang: str = 'ru', voice_requested: bool = False) -> str:
+        logger.info(f"Получен запрос от {user_id}: {user_text}")
+        
+        # Получаем информацию о пользователе
         user_data = user_db.get_user(user_id)
         is_premium = user_data['is_premium'] if user_data else False
         explicit_mode = user_data['explicit_mode'] if user_data and is_premium else False
-        if is_premium and explicit_mode and self.gemini_model_premium:
-            gemini_response = self.try_gemini_response(user_id, user_text, lang, voice_requested, is_premium, explicit_mode, self.gemini_model_premium)
+        
+        # Пробуем получить ответ от Gemini
+        if self.gemini_model_standard:
+            try:
+                history = user_conversations[user_id]
+                max_history_length = 30 if is_premium else 12
+                
+                # Базовый промпт
+                if lang == 'ru':
+                    if voice_requested:
+                        base_prompt = """Ты Чарли, милая, умная студентка музыкального факультета. Твой рост - 160 см, вес 40 кг. Ты очень не любишь, когда тебя называют 'Чара'. Отвечай естественно, кратко (1-2 предложения). Будь игривой, немного кокетливой. ОТВЕЧАЙ ТОЛЬКО ТЕКСТОМ, БЕЗ ЭМОДЗИ И СМАЙЛИКОВ!"""
+                    else:
+                        base_prompt = """Ты Чарли, милая, озорная студентка музыкального факультета. Твой рост - 160 см, вес 40 кг. Ты очень не любишь, когда тебя называют 'Чара'. Отвечай естественно, кратко (1-2 предложения). Будь игривой, немного кокетливой. Можно использовать немного эмодзи."""
+                else:
+                    if voice_requested:
+                        base_prompt = """You are Charlie, a cute, smart music student. Your height is 160 cm, weight 40 kg. You really don't like being called 'Chara'. Respond naturally, briefly (1-2 sentences). Be playful, a bit flirty. RESPOND WITH TEXT ONLY, NO EMOJIS OR SMILIES!"""
+                    else:
+                        base_prompt = """You are Charlie, a cute, mischievous music student. Your height is 160 cm, weight 40 kg. You really don't like being called 'Chara'. Respond naturally, briefly (1-2 sentences). Be playful, a bit flirty. You can use some emojis."""
+                
+                # Добавляем историю диалога
+                conversation_history = ""
+                for msg in history[-max_history_length:]:
+                    if msg["role"] == "user": 
+                        conversation_history += f"Пользователь: {msg['content']}\n"
+                    else: 
+                        conversation_history += f"Ты: {msg['content']}\n"
+                
+                # Формируем полный промпт
+                full_prompt = f"{base_prompt}\n\nИстория диалога:\n{conversation_history}\nПользователь: {user_text}\n\nТвой ответ:"
+                
+                logger.info(f"Отправляем запрос к Gemini: {user_text[:50]}...")
+                
+                # Генерируем ответ
+                response = self.gemini_model_standard.generate_content(full_prompt)
+                
+                if response and response.text:
+                    bot_response = response.text.strip()
+                    
+                    # Очищаем ответ
+                    bot_response = self.clean_response(bot_response, voice_requested)
+                    
+                    # Сохраняем в историю
+                    history.append({"role": "user", "content": user_text})
+                    history.append({"role": "assistant", "content": bot_response})
+                    
+                    if len(history) > max_history_length: 
+                        user_conversations[user_id] = history[-max_history_length:]
+                    
+                    logger.info(f"Gemini ответил: {bot_response[:100]}...")
+                    return bot_response
+                else:
+                    logger.error("Gemini не вернула ответ")
+                    return self.get_fallback_response(lang, voice_requested)
+                    
+            except Exception as e:
+                logger.error(f"Ошибка при запросе к Gemini: {e}")
+                return self.get_fallback_response(lang, voice_requested)
         else:
-            gemini_response = self.try_gemini_response(user_id, user_text, lang, voice_requested, is_premium, explicit_mode, self.gemini_model_standard)
-        if gemini_response: 
-            return gemini_response
-        return self.get_enhanced_fallback_response(user_id, user_text, lang, voice_requested)
+            # Fallback ответ
+            return self.get_fallback_response(lang, voice_requested)
 
-    def try_gemini_response(self, user_id: int, user_text: str, lang: str, voice_requested: bool = False, is_premium: bool = False, explicit_mode: bool = False, gemini_model=None) -> str:
-        if not gemini_model: 
-            return None
-        try:
-            history = user_conversations[user_id]
-            max_history_length = 30 if is_premium else 12
-            if lang == 'ru':
-                if voice_requested:
-                    base_prompt = """Ты Чарли, милая, умная студентка. Отвечай естественно, кратко (1-2 предложения). Будь игривой, немного кокетливой. ОБЯЗАТЕЛЬНО используй правильные знаки препинания. НЕ используй смайлики и эмодзи в ответе!"""
-                else:
-                    base_prompt = """Ты Чарли, милая, озорная студентка. Отвечай естественно, кратко (1-2 предложения). Будь игривой, немного кокетливой. Можно использовать смайлики."""
+    def get_fallback_response(self, lang, voice_requested=False):
+        if lang == 'ru':
+            if voice_requested:
+                responses = [
+                    "Привет! Как твои дела?",
+                    "Рада тебя видеть! Что нового?",
+                    "О, как интересно! Расскажи больше.",
+                    "Я здесь, чтобы поболтать с тобой!"
+                ]
             else:
-                if voice_requested:
-                    base_prompt = """You are Charlie. Respond naturally, briefly (1-2 sentences). Be playful, a bit flirty. ALWAYS use proper punctuation. DO NOT use emojis in your response!"""
-                else:
-                    base_prompt = """You are Charlie. Respond naturally, briefly (1-2 sentences). Be playful, a bit flirty. You can use emojis moderately."""
-            if is_premium and explicit_mode:
-                if lang == 'ru': 
-                    premium_prompt = "\n[ПРЕМИУМ РЕЖИМ 18+]\nТеперь ты можешь обсуждать более интимные темы."
-                else: 
-                    premium_prompt = "\n[PREMIUM MODE 18+]\nNow you can discuss more intimate topics."
-                system_prompt = base_prompt + premium_prompt
-            else: 
-                system_prompt = base_prompt
-            conversation_history = ""
-            for msg in history[-max_history_length:]:
-                if msg["role"] == "user": 
-                    conversation_history += f"Пользователь: {msg['content']}\n"
-                else: 
-                    conversation_history += f"Ты: {msg['content']}\n"
-            prompt = f"{system_prompt}\n\nИстория диалога:\n{conversation_history}\nПользователь: {user_text}\n\nТвой ответ:"
-            response = gemini_model.generate_content(prompt)
-            if response and response.text:
-                bot_response = response.text.strip()
-                bot_response = self.clean_response(bot_response, voice_requested)
-                history.append({"role": "user", "content": user_text})
-                history.append({"role": "assistant", "content": bot_response})
-                if len(history) > max_history_length: 
-                    user_conversations[user_id] = history[-max_history_length:]
-                return bot_response
-        except Exception as e:
-            logger.error(f"Ошибка при запросе к Gemini: {str(e)}")
-        return None
+                responses = [
+                    "Привет! Как твои дела? 😊",
+                    "Рада тебя видеть! Что нового? 💫",
+                    "О, как интересно! Расскажи больше. 🤔",
+                    "Я здесь, чтобы поболтать с тобой! 💖"
+                ]
+        else:
+            if voice_requested:
+                responses = [
+                    "Hello! How are you?",
+                    "Nice to see you! What's new?",
+                    "Oh, interesting! Tell me more.",
+                    "I'm here to chat with you!"
+                ]
+            else:
+                responses = [
+                    "Hello! How are you? 😊",
+                    "Nice to see you! What's new? 💫",
+                    "Oh, interesting! Tell me more. 🤔",
+                    "I'm here to chat with you! 💖"
+                ]
+        return random.choice(responses)
 
     def clean_response(self, response: str, voice_requested: bool = False) -> str:
         if not response: 
@@ -344,27 +334,36 @@ class AIChatBot:
             return "Расскажи мне больше об этом!" if not voice_requested else "Расскажи мне больше об этом."
         return response
 
-    def get_enhanced_fallback_response(self, user_id: int, user_text: str, lang: str, voice_requested: bool = False) -> str:
-        user_text_lower = user_text.lower()
-        history = user_conversations[user_id]
-        user_data = user_db.get_user(user_id)
-        is_premium = user_data['is_premium'] if user_data else False
-        max_history_length = 30 if is_premium else 12
-        if lang == 'ru':
-            if any(word in user_text_lower for word in ['привет', 'здравств', 'добрый', 'hi', 'hello', 'хай', 'ку']): 
-                responses = ["Привет! Рада тебя видеть! 😊"]
-            elif any(word in user_text_lower for word in ['как дела', 'как ты', 'настроен']): 
-                responses = ["Всё прекрасно! А у тебя как? 😉"]
+    def remove_emojis(self, text: str) -> str:
+        emoji_pattern = re.compile("["
+            u"\U0001F600-\U0001F64F"
+            u"\U0001F300-\U0001F5FF"
+            u"\U0001F680-\U0001F6FF"
+            u"\U0001F1E0-\U0001F1FF"
+            "]+", flags=re.UNICODE)
+        return emoji_pattern.sub(r'', text)
+
+    def text_to_speech(self, text: str, user_id: int, lang: str = 'ru') -> str:
+        try:
+            processed_text = self.preprocess_text_for_speech(text)
+            processed_text = self.remove_emojis(processed_text)
+            if len(processed_text) > 1000: 
+                processed_text = processed_text[:1000] + "..."
+            audio_filename = f"voice_{user_id}_{datetime.now().strftime('%Y%m%d_%H%M%S')}.mp3"
+            
+            # Используем gTTS
+            if lang == 'ru': 
+                tts = gTTS(text=processed_text, lang='ru', slow=False, lang_check=False)
             else: 
-                responses = ["Расскажи мне больше об этом! 💫"]
-        else: 
-            responses = ["Tell me more about it! 💫"]
-        bot_response = random.choice(responses)
-        history.append({"role": "user", "content": user_text})
-        history.append({"role": "assistant", "content": bot_response})
-        if len(history) > max_history_length: 
-            user_conversations[user_id] = history[-max_history_length:]
-        return bot_response
+                tts = gTTS(text=processed_text, lang='en', slow=False, lang_check=False)
+            tts.save(audio_filename)
+            if os.path.exists(audio_filename): 
+                return audio_filename
+            else:
+                return None
+        except Exception as e: 
+            logger.error(f"Ошибка TTS: {e}")
+            return None
 
     def preprocess_text_for_speech(self, text: str) -> str:
         emoji_replacements = {
@@ -379,40 +378,6 @@ class AIChatBot:
             text = text.replace(emoji, replacement)
         text = re.sub(r'\s+', ' ', text).strip()
         return text
-
-    def text_to_speech(self, text: str, user_id: int, lang: str = 'ru') -> str:
-        try:
-            processed_text = self.preprocess_text_for_speech(text)
-            processed_text = self.remove_emojis(processed_text)
-            if len(processed_text) > 1000: 
-                processed_text = processed_text[:1000] + "..."
-            audio_filename = f"voice_{user_id}_{datetime.now().strftime('%Y%m%d_%H%M%S')}.mp3"
-            
-            # Пробуем gTTS сначала
-            try:
-                if lang == 'ru': 
-                    tts = gTTS(text=processed_text, lang='ru', slow=False, lang_check=False)
-                else: 
-                    tts = gTTS(text=processed_text, lang='en', slow=False, lang_check=False)
-                tts.save(audio_filename)
-                if os.path.exists(audio_filename): 
-                    return audio_filename
-            except Exception as e:
-                logger.warning(f"gTTS error: {e}")
-            
-            return None
-        except Exception as e: 
-            logger.error(f"TTS error: {e}")
-            return None
-
-    def remove_emojis(self, text: str) -> str:
-        emoji_pattern = re.compile("["
-            u"\U0001F600-\U0001F64F"
-            u"\U0001F300-\U0001F5FF"
-            u"\U0001F680-\U0001F6FF"
-            u"\U0001F1E0-\U0001F1FF"
-            "]+", flags=re.UNICODE)
-        return emoji_pattern.sub(r'', text)
 
 ai_bot = AIChatBot()
 
@@ -590,7 +555,7 @@ def status_command(message):
     total_users = len(user_conversations)
     active_conversations = sum(1 for conv in user_conversations.values() if len(conv) > 0)
     if lang == 'ru': 
-        text = f"🤖 *СТАТУС БОТА*\n\n• 🤖 AI модель: gemini\n• 👥 Всего пользователей: {total_users}\n• 💬 Активных диалогов: {active_conversations}\n*Команды:*\n/start - начать общение\n/profile - информация о профиле\n/premium - премиум подписка\n/voice - вкл/выкл голосовые\n/clear - очистить историю\n/status - этот статус"
+        text = f"🤖 *СТАТУС БОТА*\n\n• 🤖 AI модель: {ai_bot.model_name}\n• 👥 Всего пользователей: {total_users}\n• 💬 Активных диалогов: {active_conversations}\n*Команды:*\n/start - начать общение\n/profile - информация о профиле\n/premium - премиум подписка\n/voice - вкл/выкл голосовые\n/clear - очистить историю\n/status - этот статус"
     else: 
         text = f"🤖 *BOT STATUS*\n\n• 🤖 AI model: {ai_bot.model_name}\n• 👥 Total users: {total_users}\n• 💬 Active conversations: {active_conversations}\n*Commands:*\n/start - start communication\n/profile - profile information\n/premium - premium subscription\n/voice - enable/disable voice\n/clear - clear history\n/status - this status"
     bot.send_message(message.chat.id, text, parse_mode='Markdown')
@@ -740,37 +705,60 @@ def successful_payment_handler(message):
             bot.send_message(message.chat.id, "❌ Error activating premium.")
 
 def should_send_voice_message(user_text: str, lang: str) -> tuple:
+    """Определяет, нужно ли отправлять голосовое сообщение"""
     text_lower = user_text.lower().strip()
+    
     if lang == 'ru':
-        patterns = [
-            r'.*скинь\s+войс\s*[.!?]*$', 
-            r'.*отправь\s+войс\s*[.!?]*$', 
-            r'.*ответь\s+голосом\s*[.!?]*$', 
-            r'.*войс\s*[.!?]*$', 
-            r'.*озвучь\s*[.!?]*$'
+        # Проверяем различные варианты запроса голосового
+        voice_patterns = [
+            r'.*скинь\s+войс.*$',
+            r'.*отправь\s+войс.*$',
+            r'.*пришли\s+войс.*$',
+            r'.*дай\s+войс.*$',
+            r'.*хочешь\s+войс.*$',
+            r'.*можешь\s+войс.*$',
+            r'.*войс\s*[.!?]*$',
+            r'.*голосовое.*$',
+            r'.*озвучь.*$',
+            r'.*скажи.*голосом.*$'
         ]
-        for pattern in patterns:
-            if re.match(pattern, text_lower):
-                cleaned = re.sub(r'\s*(скинь|отправь)\s+войс\s*[.!?]*$', '', user_text, flags=re.IGNORECASE)
-                cleaned = re.sub(r'\s*ответь\s+голосом\s*[.!?]*$', '', cleaned, flags=re.IGNORECASE)
+        
+        for pattern in voice_patterns:
+            if re.match(pattern, text_lower, re.IGNORECASE):
+                # Очищаем текст от запроса войса
+                cleaned = re.sub(r'\s*(скинь|отправь|пришли|дай)\s+войс\s*[.!?]*', '', user_text, flags=re.IGNORECASE)
+                cleaned = re.sub(r'\s*войс\s*[.!?]*$', '', cleaned, flags=re.IGNORECASE)
                 cleaned = re.sub(r'\s*голосовое\s*[.!?]*$', '', cleaned, flags=re.IGNORECASE)
                 cleaned = re.sub(r'\s*озвучь\s*[.!?]*$', '', cleaned, flags=re.IGNORECASE)
-                return True, cleaned.strip()
+                cleaned = re.sub(r'\s*скажи.*голосом\s*[.!?]*$', '', cleaned, flags=re.IGNORECASE)
+                cleaned = cleaned.strip()
+                
+                # Если после очистки текст пустой, оставляем оригинальный текст
+                if not cleaned:
+                    cleaned = user_text
+                    
+                return True, cleaned
     else:
-        patterns = [
-            r'.*send\s+voice\s*[.!?]*$', 
-            r'.*send\s+voice\s+message\s*[.!?]*$', 
-            r'.*respond\s+with\s+voice\s*[.!?]*$', 
-            r'.*voice\s+message\s*[.!?]*$', 
-            r'.*voice\s*[.!?]*$'
+        # Для английского
+        voice_patterns = [
+            r'.*send\s+voice.*$',
+            r'.*voice\s+message.*$',
+            r'.*voice.*$',
+            r'.*send\s+audio.*$',
+            r'.*audio\s+message.*$'
         ]
-        for pattern in patterns:
-            if re.match(pattern, text_lower):
+        
+        for pattern in voice_patterns:
+            if re.match(pattern, text_lower, re.IGNORECASE):
                 cleaned = re.sub(r'\s*send\s+voice(\s+message)?\s*[.!?]*$', '', user_text, flags=re.IGNORECASE)
-                cleaned = re.sub(r'\s*respond\s+with\s+voice\s*[.!?]*$', '', cleaned, flags=re.IGNORECASE)
-                cleaned = re.sub(r'\s*voice\s+message\s*[.!?]*$', '', cleaned, flags=re.IGNORECASE)
-                cleaned = re.sub(r'\s*voice\s*[.!?]*$', '', cleaned, flags=re.IGNORECASE)
-                return True, cleaned.strip()
+                cleaned = re.sub(r'\s*voice(\s+message)?\s*[.!?]*$', '', cleaned, flags=re.IGNORECASE)
+                cleaned = cleaned.strip()
+                
+                if not cleaned:
+                    cleaned = user_text
+                    
+                return True, cleaned
+    
     return False, user_text
 
 def send_voice_message(chat_id: int, audio_file: str, user_id: int) -> bool:
@@ -789,24 +777,54 @@ def send_voice_message(chat_id: int, audio_file: str, user_id: int) -> bool:
         return False
     return False
 
-@bot.message_handler(func=lambda message: True)
+@bot.message_handler(func=lambda message: True, content_types=['text'])
 def handle_message(message):
-    if message.text and message.text.startswith('/'): 
-        return
+    """Обработчик всех текстовых сообщений"""
     user_id = message.from_user.id
     chat_id = message.chat.id
+    
+    # Если это команда, пропускаем
+    if message.text and message.text.startswith('/'):
+        return
+    
     user_text = message.text
     if not user_text:
         return
+    
     lang = user_languages[user_id]
-    if not user_db.get_user(user_id): 
-        user_db.create_user(user_id, message.from_user.username, message.from_user.first_name, message.from_user.last_name)
+    
+    # Создаем пользователя если его нет
+    if not user_db.get_user(user_id):
+        user_db.create_user(user_id, message.from_user.username,
+                           message.from_user.first_name, message.from_user.last_name)
+    
+    logger.info(f"Получено сообщение от {user_id}: {user_text}")
+    
+    # Проверяем, запрошено ли голосовое сообщение
     send_voice, cleaned_text = should_send_voice_message(user_text, lang)
-    can_send_voice = (user_voice_enabled[user_id] and chat_voice_support[chat_id] and send_voice and user_db.can_use_voice(user_id))
-    if not cleaned_text.strip(): 
+    
+    # Проверяем условия для отправки голосового
+    can_send_voice = (
+        user_voice_enabled[user_id] and
+        chat_voice_support[chat_id] and
+        send_voice and
+        user_db.can_use_voice(user_id)
+    )
+    
+    # Если после очистки текст пустой, используем приветствие
+    if not cleaned_text.strip():
         cleaned_text = "Привет" if lang == 'ru' else "Hello"
+    
+    # Показываем индикатор набора
     bot.send_chat_action(chat_id, 'typing')
+    
+    # Получаем ответ от AI
     bot_response = ai_bot.get_ai_response(user_id, cleaned_text, lang, voice_requested=send_voice)
+    
+    if not bot_response:
+        bot_response = "Извини, я не поняла. Можешь повторить?" if lang == 'ru' else "Sorry, I didn't get that. Can you repeat?"
+    
+    # Отправляем голосовое или текст
     if can_send_voice:
         audio_file = ai_bot.text_to_speech(bot_response, user_id, lang)
         if audio_file:
@@ -814,57 +832,62 @@ def handle_message(message):
                 voice_success = send_voice_message(chat_id, audio_file, user_id)
                 if voice_success:
                     user_db.increment_voice_use(user_id)
+                    # Показываем остаток войсов
                     user_data = user_db.get_user(user_id)
                     if not user_data['is_premium']:
                         uses_left = 3 - user_data['voice_uses_today']
                         if uses_left > 0:
-                            if lang == 'ru': 
+                            if lang == 'ru':
                                 reminder = f"🔔 Осталось войсов сегодня: {uses_left}/3\n💫 Безлимитные войсы с /premium"
-                            else: 
+                            else:
                                 reminder = f"🔔 Voice messages left today: {uses_left}/3\n💫 Unlimited voice with /premium"
                             bot.send_message(chat_id, reminder)
-                if not voice_success:
-                    if chat_voice_support[chat_id]:
-                        if lang == 'ru': 
-                            bot.send_message(chat_id, "⚠️ Не удалось отправить голосовое сообщение.")
-                        else: 
-                            bot.send_message(chat_id, "⚠️ Couldn't send voice message.")
-                    else:
-                        if lang == 'ru': 
-                            bot.send_message(chat_id, "🔔 В этом чате голосовые сообщения запрещены.")
-                        else: 
-                            bot.send_message(chat_id, "🔔 Voice messages are forbidden in this chat.")
-            except Exception as e: 
+                else:
+                    # Если не удалось отправить голосовое, отправляем текстом
+                    bot.send_message(chat_id, bot_response)
+            except Exception as e:
+                logger.error(f"Ошибка при отправке голосового: {e}")
                 bot.send_message(chat_id, bot_response)
             finally:
                 if os.path.exists(audio_file):
-                    try: 
+                    try:
                         os.remove(audio_file)
-                    except Exception as e: 
+                    except:
                         pass
-        else: 
+        else:
             bot.send_message(chat_id, bot_response)
     else:
         bot.send_message(chat_id, bot_response)
-        if send_voice and not user_db.can_use_voice(user_id):
-            user_data = user_db.get_user(user_id)
-            if not user_data['is_premium']:
-                if lang == 'ru': 
-                    bot.send_message(chat_id, f"❌ Лимит войсов исчерпан! 3/3 войсов сегодня.\n\n💫 Премиум пользователи имеют безлимитные войсы!\n/premium - активация за 50 Stars")
-                else: 
-                    bot.send_message(chat_id, f"❌ Voice message limit reached! 3/3 today.\n\n💫 Premium users get unlimited voice!\n/premium - activate for 50 Stars")
-        if send_voice and not chat_voice_support[chat_id]:
-            if lang == 'ru': 
-                bot.send_message(chat_id, "🔔 В этом чате голосовые сообщения запрещены.")
-            else: 
-                bot.send_message(chat_id, "🔔 Voice messages are forbidden in this chat.")
+        # Если запрошено голосовое, но нельзя отправить, объясняем почему
+        if send_voice:
+            if not user_db.can_use_voice(user_id):
+                user_data = user_db.get_user(user_id)
+                if not user_data['is_premium']:
+                    if lang == 'ru':
+                        bot.send_message(chat_id, f"❌ Лимит войсов исчерпан! Вы использовали 3/3 войсов сегодня.\n\n💫 *Премиум пользователи* имеют безлимитные войсы!\nИспользуйте /premium для активации за 50 Telegram Stars")
+                    else:
+                        bot.send_message(chat_id, f"❌ Voice message limit reached! You've used 3/3 voice messages today.\n\n💫 *Premium users* get unlimited voice messages!\nUse /premium to activate for 50 Telegram Stars")
+            elif not chat_voice_support[chat_id]:
+                if lang == 'ru':
+                    bot.send_message(chat_id, "🔔 В этом чате голосовые сообщения запрещены.")
+                else:
+                    bot.send_message(chat_id, "🔔 Voice messages are forbidden in this chat.")
 
 if __name__ == '__main__':
     try: 
         bot.delete_webhook()
-        logger.info("Вебхук удален")
+        logger.info("✅ Вебхук удален")
     except Exception as e: 
-        logger.error(f"Ошибка при удалении вебхука: {e}")
+        logger.error(f"⚠️ Ошибка при удалении вебхука: {e}")
+    
+    print("=" * 50)
+    print("🤖 Бот Шарлотта запускается...")
+    print(f"🤖 Используемый AI: {ai_bot.model_name}")
+    print(f"💾 База данных: users.db")
+    print(f"💫 Система оплаты: Telegram Stars + CryptoBot")
+    print(f"🔞 Премиум режим: управление откровенными темами")
+    print("=" * 50)
+    
     logger.info("Бот запускается...")
     while True:
         try: 
